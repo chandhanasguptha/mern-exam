@@ -27,13 +27,22 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 // Database connection assurance for serverless environments and cold starts
-let isConnecting = null;
 app.use(async (req, res, next) => {
-  if (mongoose.connection.readyState === 0) {
-    if (!isConnecting) {
-      isConnecting = connectDB().finally(() => { isConnecting = null; });
+  // Allow health check endpoint to always respond immediately without blocking
+  if (req.path === '/api/health' || req.path === '/health') {
+    return next();
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    try {
+      await connectDB();
+    } catch (err) {
+      return res.status(503).json({
+        success: false,
+        message: err.message || 'Database connection unavailable',
+        data: null
+      });
     }
-    await isConnecting;
   }
   next();
 });

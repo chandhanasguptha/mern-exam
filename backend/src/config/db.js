@@ -3,26 +3,62 @@ const mongoose = require('mongoose');
 let isMemoryServer = false;
 let memoryServerInstance = null;
 
-async function connectDB() {
-  const uri = process.env.MONGODB_URI;
+// Cache connection globally across serverless function invocations (standard Vercel pattern)
+let cached = global.mongoose;
+if (!cached) {
+  cached = global.mongoose = { conn: null, promise: null };
+}
 
-  // Option to explicitly force memory server via env flag
-  if (process.env.USE_MEMORY_DB === 'true' || !uri) {
-    return await startMemoryServer('Explicitly requested or MONGODB_URI not provided');
+async function connectDB() {
+  if (cached.conn && mongoose.connection.readyState === 1) {
+    return cached.conn;
+  }
+
+  const uri = process.env.MONGODB_URI;
+  const isVercel = !!process.env.VERCEL || process.env.NODE_ENV === 'production';
+
+  // If no URI or in local test environment without Atlas
+  if (!uri || uri.includes('cluster0.mongodb.net') && !process.env.VERCEL) {
+    if (!isVercel) {
+      return await startMemoryServer('MONGODB_URI not provided or placeholder used in development');
+    }
+  }
+
+  if (!uri) {
+    throw new Error('MONGODB_URI is not set in environment variables. Please add MONGODB_URI in Vercel Project Settings.');
+  }
+
+  if (!cached.promise) {
+    console.log('[DB] Connecting to MongoDB...');
+    cached.promise = mongoose.connect(uri, {
+      serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 5000,
+      socketTimeoutMS: 10000,
+      bufferCommands: false // Do not buffer queries if connection is down
+    }).then((m) => {
+      console.log(`[DB] Successfully connected to MongoDB at ${m.connection.host}/${m.connection.name}`);
+      isMemoryServer = false;
+      return m;
+    }).catch(async (err) => {
+      cached.promise = null;
+      console.error(`[DB] Direct connection to provided MONGODB_URI failed: ${err.message}`);
+
+      // In local development only, fallback to in-memory server
+      if (!isVercel && process.env.NODE_ENV !== 'production') {
+        console.log('[DB] Initializing In-Memory MongoDB instance for local development...');
+        return await startMemoryServer(`Fallback due to: ${err.message}`);
+      }
+
+      throw new Error(`MongoDB connection failed: ${err.message}. Ensure MONGODB_URI is correct in Vercel and 0.0.0.0/0 is added in MongoDB Atlas Network Access.`);
+    });
   }
 
   try {
-    console.log('[DB] Connecting to MongoDB...');
-    // Connect with a 5s timeout so it doesn't hang forever if placeholder cluster isn't reachable
-    await mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 5000
-    });
-    console.log(`[DB] Successfully connected to MongoDB at ${mongoose.connection.host}/${mongoose.connection.name}`);
-    isMemoryServer = false;
-  } catch (err) {
-    console.warn(`[DB] Direct connection to provided MONGODB_URI failed: ${err.message}`);
-    console.log('[DB] Initializing In-Memory MongoDB instance for development & testing...');
-    await startMemoryServer(`Fallback due to: ${err.message}`);
+    cached.conn = await cached.promise;
+    return cached.conn;
+  } catch (e) {
+    cached.promise = null;
+    throw e;
   }
 }
 
@@ -37,6 +73,7 @@ async function startMemoryServer(reason) {
     await mongoose.connect(memUri);
     isMemoryServer = true;
     console.log(`[DB] Connected to MongoDB Memory Server: ${memUri} (${reason})`);
+    return mongoose;
   } catch (memErr) {
     console.error('[DB] Failed to start MongoDB Memory Server:', memErr.message);
     throw memErr;
