@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const mongoose = require('mongoose');
 const { connectDB } = require('./config/db');
 const applicationRoutes = require('./routes/applicationRoutes');
 const healthRoutes = require('./routes/healthRoutes');
@@ -25,12 +26,27 @@ if (process.env.NODE_ENV !== 'test') {
   app.use(morgan('dev'));
 }
 
-// Routes
+// Database connection assurance for serverless environments and cold starts
+let isConnecting = null;
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState === 0) {
+    if (!isConnecting) {
+      isConnecting = connectDB().finally(() => { isConnecting = null; });
+    }
+    await isConnecting;
+  }
+  next();
+});
+
+// Routes (supporting both /api prefix from Vercel rewrites and root mounting)
 app.use('/api/health', healthRoutes);
+app.use('/health', healthRoutes);
+
 app.use('/api/applications', applicationRoutes);
+app.use('/applications', applicationRoutes);
 
 // Welcome / Root endpoint
-app.get('/', (req, res) => {
+app.get(['/', '/api'], (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Job Application Tracker API is running',
@@ -66,4 +82,6 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, startServer };
+module.exports = app;
+module.exports.app = app;
+module.exports.startServer = startServer;
